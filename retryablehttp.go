@@ -44,11 +44,11 @@ func (c *Client) Do(url, method string, body []byte, headers map[string]string) 
 	}
 
 	req, err := http.NewRequestWithContext(c.Context, method, url, bytes.NewReader(body))
-	req.Header = header
 	if err != nil {
 		return nil, fmt.Errorf("failed to create http request: %w", err)
 	}
-
+	
+	req.Header = header
 	var resp = &http.Response{}
 
 	backoffpolicy.BackoffPolicy(c.RetryStrategy, c.RetryAttempts, c.RetryDelay, func(attempt int) error {
