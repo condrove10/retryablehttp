@@ -1,12 +1,10 @@
-package backoffpolicy
+package backoffpolicy // import "github.com/condrove10/retryablehttp/backoffpolicy"
 
 import (
 	"errors"
 	"fmt"
 	"math"
 	"time"
-
-	"github.com/go-playground/validator/v10"
 )
 
 type Strategy string
@@ -27,17 +25,17 @@ func ValidateStrategy(s Strategy) error {
 	return errors.New("invalid strategy: " + string(s))
 }
 
-func BackoffPolicy(strategy Strategy, attempts int, delay time.Duration, policy func(attempt int) error) error {
+func BackoffPolicy(strategy Strategy, attempts uint32, delay time.Duration, policy func(attempt uint32) error) error {
 	if err := ValidateStrategy(strategy); err != nil {
 		return fmt.Errorf("strategy validation failed: %w", err)
 	}
 
-	if err := validator.New().Var(attempts, "required,gt=0,lte=100000"); err != nil {
-		return fmt.Errorf("attempts validation failed: %w", err)
-	}
-	var err error
+	var (
+		err     error
+		attempt uint32
+	)
 
-	for attempt := 0; attempt < attempts; attempt++ {
+	for ; attempt < attempts; attempt++ {
 		err = policy(attempt)
 		if err == nil {
 			return nil
