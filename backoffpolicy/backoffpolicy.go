@@ -30,12 +30,14 @@ func BackoffPolicy(strategy Strategy, attempts uint32, delay time.Duration, poli
 	}
 
 	for ; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(delay * time.Duration(math.Pow(float64(base), float64(attempt))))
+		}
+
 		err = policy(attempt)
 		if err == nil {
 			return nil
 		}
-
-		time.Sleep(delay * time.Duration(math.Pow(float64(base), float64(attempt))))
 	}
 
 	return fmt.Errorf("backoff policy exhausted: %w", err)

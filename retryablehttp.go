@@ -12,18 +12,10 @@ import (
 	"github.com/go-playground/validator/v10"
 )
 
-// ClientOptions defines the configuration options for creating a new Client instance.
-// It includes the number of retry attempts, the initial delay between retries,
-// and the strategy and policy used for exponential or linear backoff.
-type ClientOptions struct {
-	Attempts        uint32
-	Delay           time.Duration
-	BackoffStrategy backoffpolicy.Strategy
-	BackoffPolicy   func(resp *http.Response, err error) error
-}
+// ClientOption represents a functional option for configuring the retryable HTTP client.
+type ClientOption func(*Client)
 
 // Client represents an HTTP client that automatically retries requests on failures.
-// It encapsulates a standard HTTP client along with context management and retry logic.
 type Client struct {
 	context    context.Context
 	httpClient *http.Client
@@ -33,17 +25,66 @@ type Client struct {
 	policy     func(resp *http.Response, err error) error
 }
 
-// New creates and returns a new Client instance configured with the provided context,
-// HTTP client, and client options. This function initializes the retryable HTTP client,
-// enabling retry logic based on the specified parameters.
-func New(ctx context.Context, client *http.Client, opts *ClientOptions) *Client {
-	return &Client{
-		context:    ctx,
-		httpClient: client,
-		attempts:   opts.Attempts,
-		delay:      opts.Delay,
-		strategy:   opts.BackoffStrategy,
-		policy:     opts.BackoffPolicy,
+// Default HTTP client with 5 retry attemps and 1 second timeout.
+var defaultClient = Client{
+	context:    context.Background(),
+	httpClient: http.DefaultClient,
+	attempts:   5,
+	delay:      1 * time.Second,
+	strategy:   backoffpolicy.StrategyLinear,
+	policy: func(resp *http.Response, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		}
+
+		return nil
+	},
+}
+
+// New creates and returns a new Client instance configured with the provided options.
+// The default client configuration is used if none is specified.
+func New(ctx context.Context, opts ...ClientOption) *Client {
+	client := defaultClient
+	client.context = ctx
+
+	for _, opt := range opts {
+		opt(&client)
+	}
+
+	return &client
+}
+
+func WithHTTPClient(httpClient *http.Client) ClientOption {
+	return func(c *Client) {
+		c.httpClient = httpClient
+	}
+}
+
+func WithAttempts(attempts uint32) ClientOption {
+	return func(c *Client) {
+		c.attempts = attempts
+	}
+}
+
+func WithDelay(delay time.Duration) ClientOption {
+	return func(c *Client) {
+		c.delay = delay
+	}
+}
+
+func WithStrategy(strategy backoffpolicy.Strategy) ClientOption {
+	return func(c *Client) {
+		c.strategy = strategy
+	}
+}
+
+func WithPolicy(policy func(resp *http.Response, err error) error) ClientOption {
+	return func(c *Client) {
+		c.policy = policy
 	}
 }
 
