@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/condrove10/retryablehttp/backoffpolicy"
@@ -13,7 +14,7 @@ import (
 )
 
 // ClientOption represents a functional option for configuring the retryable HTTP client.
-type ClientOption func(*Client)
+type ClientOption func(*Client) error
 
 // Client represents an HTTP client that automatically retries requests on failures.
 type Client struct {
@@ -25,66 +26,88 @@ type Client struct {
 	policy     func(resp *http.Response, err error) error
 }
 
-// Default HTTP client with 5 retry attemps and 1 second timeout.
-var defaultClient = Client{
-	context:    context.Background(),
-	httpClient: http.DefaultClient,
-	attempts:   5,
-	delay:      1 * time.Second,
-	strategy:   backoffpolicy.StrategyLinear,
-	policy: func(resp *http.Response, err error) error {
+var (
+	defaultHttpClient        = http.DefaultClient
+	defaultAttemps    uint32 = 10
+	defaultDelay             = time.Second
+	defaultStrategy          = backoffpolicy.StrategyLinear
+	defaultPolicy            = func(resp *http.Response, err error) error {
 		if err != nil {
-			return err
+			return fmt.Errorf("propagating error: %w", err)
 		}
 
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			return fmt.Errorf("HTTP response status code (%d) outside boundaries", resp.StatusCode)
 		}
 
 		return nil
-	},
-}
+	}
+)
 
 // New creates and returns a new Client instance configured with the provided options.
 // The default client configuration is used if none is specified.
-func New(ctx context.Context, opts ...ClientOption) *Client {
-	client := defaultClient
-	client.context = ctx
-
-	for _, opt := range opts {
-		opt(&client)
+func New(ctx context.Context, opts ...ClientOption) (*Client, error) {
+	c := &Client{
+		context:    ctx,
+		httpClient: defaultHttpClient,
+		attempts:   defaultAttemps,
+		delay:      defaultDelay,
+		strategy:   defaultStrategy,
+		policy:     defaultPolicy,
 	}
 
-	return &client
+	for _, opt := range opts {
+		if err := opt(c); err != nil {
+			return nil, fmt.Errorf("failed to set optional client field: %w", err)
+		}
+	}
+
+	return c, nil
 }
 
-func WithHTTPClient(httpClient *http.Client) ClientOption {
-	return func(c *Client) {
+func WithHttpClient(httpClient *http.Client) ClientOption {
+	return func(c *Client) error {
 		c.httpClient = httpClient
+
+		return nil
 	}
 }
 
 func WithAttempts(attempts uint32) ClientOption {
-	return func(c *Client) {
+	return func(c *Client) error {
+		if attempts < 1 {
+			return fmt.Errorf("invalid atempts value '%d'", attempts)
+		}
 		c.attempts = attempts
+
+		return nil
 	}
 }
 
 func WithDelay(delay time.Duration) ClientOption {
-	return func(c *Client) {
+	return func(c *Client) error {
 		c.delay = delay
+
+		return nil
 	}
 }
 
 func WithStrategy(strategy backoffpolicy.Strategy) ClientOption {
-	return func(c *Client) {
+	return func(c *Client) error {
+		if slices.Index([]backoffpolicy.Strategy{backoffpolicy.StrategyExponential, backoffpolicy.StrategyLinear}, strategy) == -1 {
+			return fmt.Errorf("invalid backoff strategy '%s'", strategy)
+		}
 		c.strategy = strategy
+
+		return nil
 	}
 }
 
 func WithPolicy(policy func(resp *http.Response, err error) error) ClientOption {
-	return func(c *Client) {
+	return func(c *Client) error {
 		c.policy = policy
+
+		return nil
 	}
 }
 
@@ -128,29 +151,34 @@ func (c *Client) Do(url, method string, body []byte, headers map[string]string) 
 
 	var resp = &http.Response{}
 
-	// Execute the HTTP request with retry logic using the configured backoff policy.
-	err = backoffpolicy.BackoffPolicy(c.strategy, c.attempts, c.delay, func(attempt uint32) error {
-		// Ensure that the context is still active before each retry attempt.
-		if c.context.Err() != nil {
-			err := fmt.Errorf("retryable http call context closed: %w", c.context.Err())
-			return err
+	select {
+	case <-c.context.Done():
+		return nil, fmt.Errorf("context closed: %w", c.context.Err())
+	default:
+		// Execute the HTTP request with retry logic using the configured backoff policy.
+		err = backoffpolicy.BackoffPolicy(c.strategy, c.attempts, c.delay, func(attempt uint32) error {
+			// Ensure that the context is still active before each retry attempt.
+			if c.context.Err() != nil {
+				err := fmt.Errorf("retryable http call context closed: %w", c.context.Err())
+				return err
+			}
+
+			// For retries beyond the first attempt, reset the request body.
+			if attempt > 0 {
+				req.Body = io.NopCloser(bytes.NewReader(body))
+			}
+
+			// Perform the HTTP request.
+			resp, err = c.httpClient.Do(req)
+
+			// Use the custom policy to determine if a retry should occur.
+			return c.policy(resp, err)
+		})
+
+		if err != nil {
+			return nil, fmt.Errorf("backoff policy expired: %w", err)
 		}
 
-		// For retries beyond the first attempt, reset the request body.
-		if attempt > 0 {
-			req.Body = io.NopCloser(bytes.NewReader(body))
-		}
-
-		// Perform the HTTP request.
-		resp, err = c.httpClient.Do(req)
-
-		// Use the custom policy to determine if a retry should occur.
-		return c.policy(resp, err)
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("backoff policy expired: %w", err)
+		return resp, err
 	}
-
-	return resp, err
 }
